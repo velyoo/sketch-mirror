@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="512px" height="512px" viewBox="0 0 512 512" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <title>icon</title>
+    <g id="icon" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1">
+        <g id="编组">
+            <rect id="矩形" fill="#111111" x="0" y="0" width="512" height="512"></rect>
+            <g transform="translate(256, 256)">
+                <line x1="-138" y1="-80" x2="138" y2="80" id="路径" stroke="#343434" stroke-width="6" fill="#000000"></line>
+                <line x1="138" y1="-80" x2="-138" y2="80" id="路径" stroke="#343434" stroke-width="6" fill="#000000"></line>
+                <line x1="0" y1="-160" x2="0" y2="160" id="路径" stroke="#343434" stroke-width="6" fill="#000000"></line>
+                <polygon id="路径" stroke="#FFFFFF" stroke-width="18" stroke-linejoin="round" points="0 -160 138 -80 138 80 0 160 -138 80 -138 -80"></polygon>
+                <circle id="椭圆形" stroke="#111111" stroke-width="16" fill="#FFFFFF" cx="0" cy="0" r="44"></circle>
+            </g>
+        </g>
+    </g>
+</svg>

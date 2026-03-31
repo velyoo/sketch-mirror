@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Mirror">
+  <meta name="theme-color" content="#111111">
+  <meta name="color-scheme" content="dark">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/icon.svg">
+  <title>Sketch Mirror</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html { background: #111; }
+
+    :root {
+      --safe-top: env(safe-area-inset-top, 0px);
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #111;
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', sans-serif;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: none;
+    }
+
+    /* ── Canvas ── */
+    #canvas {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      overflow-y: auto;
+      overflow-x: hidden;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    /* Double-buffer: two images crossfade, no flash */
+    .preview-img {
+      position: relative;
+      display: block;
+      max-width: 100%;
+      width: auto;
+      height: auto;
+      opacity: 0;
+      transition: opacity 0.35s ease;
+      user-select: none;
+      -webkit-user-select: none;
+      pointer-events: none;
+      flex-shrink: 0;
+    }
+    /* When active, stack on top via absolute to allow crossfade */
+    .preview-img.active {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      margin: auto;
+    }
+    .preview-img.active { opacity: 1; }
+
+    /* ── Waiting State ── */
+    #waiting {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+      padding: 40px;
+      pointer-events: none;
+    }
+
+    #waiting.hidden { display: none; }
+
+    .logo {
+      width: 56px;
+      height: 56px;
+      opacity: 0.25;
+      animation: breathe 3s ease-in-out infinite;
+    }
+
+    @keyframes breathe {
+      0%, 100% { opacity: 0.2; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(1.05); }
+    }
+
+    #waiting-text {
+      font-size: 14px;
+      line-height: 1.7;
+      color: rgba(255,255,255,0.35);
+      text-align: center;
+      letter-spacing: 0.01em;
+    }
+
+    /* ── Status Bar ── */
+    #statusbar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      padding: calc(var(--safe-top) + 10px) 16px 10px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: linear-gradient(to bottom, rgba(0,0,0,0.7) 0%, transparent 100%);
+      z-index: 50;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.4s ease;
+    }
+
+    #statusbar.show { opacity: 1; }
+
+    .indicator {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: #4ade80;
+      transition: background 0.3s;
+    }
+
+    .indicator.yellow { background: #fbbf24; }
+    .indicator.red    { background: #f87171; }
+
+    #status-label {
+      font-size: 11px;
+      color: rgba(255,255,255,0.65);
+      letter-spacing: 0.02em;
+    }
+
+    /* ── Controls — hidden by default, tap to toggle ── */
+    #controls {
+      position: fixed;
+      bottom: 24px;
+      right: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      z-index: 50;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      pointer-events: none;
+    }
+    #controls.visible {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .ctrl-btn {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: none;
+      background: rgba(0,0,0,0.55);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s, transform 0.1s;
+      -webkit-appearance: none;
+    }
+
+    .ctrl-btn:active {
+      background: rgba(0,0,0,0.75);
+      transform: scale(0.92);
+    }
+
+    .ctrl-btn svg {
+      width: 18px;
+      height: 18px;
+      fill: rgba(255,255,255,0.8);
+    }
+
+    /* ── Fit toggle ── */
+    #fit-btn.contain svg { fill: rgba(255,255,255,0.8); }
+    #fit-btn.fill svg { fill: #fbbf24; }
+
+    /* ── Update flash ── */
+    @keyframes flash-in {
+      0%   { opacity: 0.6; }
+      100% { opacity: 1;   }
+    }
+
+    .flash { animation: flash-in 0.25s ease-out; }
+
+    /* ── Offline banner ── */
+    #offline-banner {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.85);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      z-index: 100;
+      display: none;
+    }
+
+    #offline-banner.show { display: flex; }
+
+    .offline-icon {
+      width: 48px;
+      height: 48px;
+      opacity: 0.4;
+    }
+
+    #offline-text {
+      font-size: 14px;
+      color: rgba(255,255,255,0.45);
+      text-align: center;
+      line-height: 1.6;
+    }
+
+    .spinner {
+      width: 20px;
+      height: 20px;
+      border: 2px solid rgba(255,255,255,0.15);
+      border-top-color: rgba(255,255,255,0.6);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Install Banner ── */
+    #install-banner {
+      position: fixed;
+      bottom: calc(var(--safe-bottom) + 16px);
+      left: 16px;
+      right: 72px;
+      background: rgba(30,30,30,0.96);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 16px;
+      padding: 14px 16px;
+      z-index: 200;
+      display: none;
+    }
+
+    #install-banner.show { display: block; }
+
+    #install-banner .ib-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: rgba(255,255,255,0.9);
+      margin-bottom: 4px;
+    }
+
+    #install-banner .ib-body {
+      font-size: 12px;
+      color: rgba(255,255,255,0.5);
+      line-height: 1.5;
+    }
+
+    #install-banner .ib-steps {
+      margin-top: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    #install-banner .ib-step {
+      font-size: 12px;
+      color: rgba(255,255,255,0.6);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    #install-banner .ib-step span.num {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.12);
+      font-size: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      color: white;
+    }
+
+    #install-close {
+      position: absolute;
+      top: 10px;
+      right: 12px;
+      background: none;
+      border: none;
+      color: rgba(255,255,255,0.35);
+      font-size: 18px;
+      cursor: pointer;
+      line-height: 1;
+      padding: 2px 4px;
+    }
+    /* ── Frame Indicator ── */
+    #frame-indicator {
+      position: fixed;
+      bottom: 36px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.55);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      color: rgba(255,255,255,0.85);
+      padding: 5px 14px;
+      border-radius: 20px;
+      font-size: 12px;
+      letter-spacing: 0.02em;
+      z-index: 60;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      pointer-events: none;
+      white-space: nowrap;
+      max-width: 80vw;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #frame-indicator.show { opacity: 1; }
+  </style>
+</head>
+<body>
+
+  <!-- Status Bar -->
+  <div id="statusbar">
+    <div class="indicator" id="indicator"></div>
+    <span id="status-label">连接中…</span>
+  </div>
+
+  <!-- Main Canvas -->
+  <div id="canvas">
+    <div id="waiting">
+      <!-- Sketch diamond logo -->
+      <svg class="logo" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M100 10L178 55L178 145L100 190L22 145L22 55Z" stroke="white" stroke-width="8" fill="none"/>
+        <path d="M100 10L100 190M22 55L178 145M178 55L22 145" stroke="white" stroke-width="3" opacity="0.4"/>
+        <circle cx="100" cy="100" r="18" stroke="white" stroke-width="6" fill="none"/>
+      </svg>
+      <p id="waiting-text">在 Sketch 中选择一个 Frame<br>即可在此预览</p>
+    </div>
+
+    <img id="preview-a" class="preview-img" alt="" draggable="false">
+    <img id="preview-b" class="preview-img" alt="" draggable="false">
+  </div>
+
+  <!-- Frame Indicator -->
+  <div id="frame-indicator"></div>
+
+  <!-- Controls -->
+  <div id="controls">
+    <!-- Refresh -->
+    <button class="ctrl-btn" id="refresh-btn" title="手动刷新">
+      <svg viewBox="0 0 24 24"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-8 3.58-8 8s3.58 8 8 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+    </button>
+    <!-- Reset zoom -->
+    <button class="ctrl-btn" id="zoom-reset-btn" title="重置缩放">
+      <svg viewBox="0 0 24 24"><text x="3" y="17" font-size="11" fill="rgba(255,255,255,0.8)" font-family="sans-serif" font-weight="600">1:1</text></svg>
+    </button>
+    <!-- Fit/Fill toggle -->
+    <button class="ctrl-btn contain" id="fit-btn" title="填充/适配">
+      <svg viewBox="0 0 24 24"><path d="M3 3h7v2H5v5H3V3zm11 0h7v7h-2V5h-5V3zM3 14h2v5h5v2H3v-7zm16 5h-5v2h7v-7h-2v5z"/></svg>
+    </button>
+  </div>
+
+  <!-- Offline Banner -->
+  <div id="offline-banner">
+    <div class="spinner"></div>
+    <p id="offline-text">正在连接到 Sketch Mirror…<br><small style="opacity:0.6">确保与 Mac 在同一 WiFi</small></p>
+  </div>
+
+  <!-- Install Guide Banner -->
+  <div id="install-banner">
+    <button id="install-close">×</button>
+    <div class="ib-title">添加到主屏幕，像 App 一样使用</div>
+    <div class="ib-steps" id="install-steps"></div>
+  </div>
+
+  <script>
+    const preview    = document.getElementById('preview');
+    const waiting    = document.getElementById('waiting');
+    const statusbar  = document.getElementById('statusbar');
+    const indicator  = document.getElementById('indicator');
+    const statusLbl  = document.getElementById('status-label');
+    const offBanner  = document.getElementById('offline-banner');
+    const refreshBtn = document.getElementById('refresh-btn');
+    const fitBtn     = document.getElementById('fit-btn');
+    const imgA       = document.getElementById('preview-a');
+    const imgB       = document.getElementById('preview-b');
+
+    let ws = null;
+    let reconnectTimer = null;
+    let activeImg = imgA; // currently visible image
+    let inactiveImg = imgB; // loading into this one
+    let statusTimer = null;
+    let fitMode = 'contain'; // 'contain' | 'fill'
+
+    // ── Status Helpers ─────────────────────────────────────────────────────
+    function showStatus(text, color, autohide = true) {
+      clearTimeout(statusTimer);
+      indicator.className = 'indicator' + (color !== 'green' ? ` ${color}` : '');
+      statusLbl.textContent = text;
+      statusbar.classList.add('show');
+      if (autohide) {
+        statusTimer = setTimeout(() => statusbar.classList.remove('show'), 2500);
+      }
+    }
+
+    // ── Double-buffer crossfade — only when content actually changes ──────
+    let currentEtag = null;
+    let prevBlobUrl = null;
+
+    async function fetchSnapshot() {
+      try {
+        const headers = currentEtag ? { 'If-None-Match': currentEtag } : {};
+        const res = await fetch('/snapshot', { headers, cache: 'no-store' });
+
+        // 304 = same image, 204 = no image yet — do nothing, no crossfade
+        if (res.status === 304 || res.status === 204 || !res.ok) return;
+
+        const newEtag = res.headers.get('ETag');
+        if (newEtag && newEtag === currentEtag) return; // same content
+        currentEtag = newEtag;
+
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+
+        const next = inactiveImg;
+        next.onload = () => {
+          next.classList.add('active');
+          activeImg.classList.remove('active');
+          inactiveImg = activeImg;
+          activeImg = next;
+          waiting.classList.add('hidden');
+          offBanner.classList.remove('show');
+          showStatus('已更新', 'green');
+          if (prevBlobUrl) URL.revokeObjectURL(prevBlobUrl);
+          prevBlobUrl = url;
+        };
+        next.onerror = () => URL.revokeObjectURL(url);
+        next.src = url;
+      } catch {}
+    }
+
+    // Fallback poll every 3s in case WebSocket misses an update
+    setInterval(fetchSnapshot, 3000);
+
+    // ── Fit / Fill toggle ─────────────────────────────────────────────────
+    function applyFit() {
+      [imgA, imgB].forEach(img => {
+        if (fitMode === 'contain') {
+          img.style.maxWidth = '100%'; img.style.maxHeight = '100%';
+          img.style.width = 'auto'; img.style.height = 'auto';
+        } else {
+          img.style.maxWidth = 'none'; img.style.maxHeight = 'none';
+          img.style.width = '100%'; img.style.height = '100%';
+          img.style.objectFit = 'cover';
+        }
+      });
+      fitBtn.className = 'ctrl-btn ' + fitMode;
+    }
+
+    fitBtn.addEventListener('click', () => {
+      fitMode = fitMode === 'contain' ? 'fill' : 'contain';
+      applyFit();
+    });
+
+    // ── Tap to toggle controls ───────────────────────────────────────────
+    const controls = document.getElementById('controls');
+    const zoomResetBtn = document.getElementById('zoom-reset-btn');
+
+    let lastTap = 0;
+    document.addEventListener('touchend', (e) => {
+      if (controls.contains(e.target)) return;
+      const now = Date.now();
+      const gap = now - lastTap;
+      lastTap = now;
+      if (gap < 300 && gap > 30) {
+        // Double tap: toggle contain / fill
+        fitMode = fitMode === 'fill' ? 'contain' : 'fill';
+        applyFit();
+        lastTap = 0;
+      } else {
+        // Single tap: toggle controls
+        controls.classList.toggle('visible');
+      }
+    }, { passive: true });
+
+    // ── Pinch-to-zoom ─────────────────────────────────────────────────────
+    let userScale = 1;
+    let pinchStartDist = null;
+    let pinchStartScale = 1;
+
+    function applyUserScale() {
+      [imgA, imgB].forEach(img => { img.style.transform = `scale(${userScale})`; });
+    }
+
+    const canvas = document.getElementById('canvas');
+    canvas.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 2) {
+        pinchStartDist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+        pinchStartScale = userScale;
+      }
+    }, { passive: true });
+
+    canvas.addEventListener('touchmove', (e) => {
+      if (e.touches.length === 2 && pinchStartDist) {
+        const dist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+        userScale = Math.max(0.25, Math.min(8, pinchStartScale * (dist / pinchStartDist)));
+        applyUserScale();
+      }
+    }, { passive: true });
+
+    canvas.addEventListener('touchend', (e) => {
+      if (e.touches.length < 2) pinchStartDist = null;
+    }, { passive: true });
+
+    zoomResetBtn.addEventListener('click', () => {
+      // 1:1 means 1 design pixel = 1 physical screen pixel
+      const img = activeImg.naturalWidth ? activeImg : inactiveImg;
+      if (img.naturalWidth) {
+        const dpr = window.devicePixelRatio || 1;
+        userScale = Math.min(
+          window.innerWidth  / (img.naturalWidth  / dpr),
+          window.innerHeight / (img.naturalHeight / dpr)
+        );
+      } else {
+        userScale = 1;
+      }
+      applyUserScale();
+    });
+
+    // ── Frame Indicator ──────────────────────────────────────────────────
+    const frameIndicator = document.getElementById('frame-indicator');
+    let frameIndTimer = null;
+    function showFrameIndicator(info) {
+      frameIndicator.textContent = info.name + '  ' + (info.index + 1) + ' / ' + info.total;
+      frameIndicator.classList.add('show');
+      clearTimeout(frameIndTimer);
+      frameIndTimer = setTimeout(() => frameIndicator.classList.remove('show'), 2000);
+    }
+
+    // ── Swipe to navigate frames ──────────────────────────────────────────
+    let swipeStartX = null, swipeStartY = null;
+    const SWIPE_MIN = 50;
+
+    canvas.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 1) {
+        swipeStartX = e.touches[0].clientX;
+        swipeStartY = e.touches[0].clientY;
+      }
+    }, { passive: true });
+
+    canvas.addEventListener('touchend', (e) => {
+      if (swipeStartX === null || !e.changedTouches.length) return;
+      const dx = e.changedTouches[0].clientX - swipeStartX;
+      const dy = e.changedTouches[0].clientY - swipeStartY;
+      swipeStartX = null; swipeStartY = null;
+      if (Math.abs(dx) < SWIPE_MIN || Math.abs(dy) > Math.abs(dx)) return;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: dx < 0 ? 'next' : 'prev' }));
+      }
+    }, { passive: true });
+
+    // ── WebSocket ─────────────────────────────────────────────────────────
+    function connect() {
+      clearTimeout(reconnectTimer);
+
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${proto}//${location.host}`);
+
+      ws.onopen = () => {
+        offBanner.classList.remove('show');
+        showStatus('已连接', 'green');
+        fetchSnapshot(); // load current image immediately on connect
+      };
+
+      ws.onmessage = (evt) => {
+        let msg;
+        try { msg = JSON.parse(evt.data); } catch { return; }
+
+        if (msg.type === 'update') {
+          fetchSnapshot();
+          if (msg.frameInfo) showFrameIndicator(msg.frameInfo);
+        } else if (msg.type === 'status' && msg.state === 'waiting') {
+          currentEtag = null;
+          // Keep showing last image, just show subtle status
+          if (!activeImg.classList.contains('active')) {
+            waiting.classList.remove('hidden');
+          }
+          showStatus('等待选择 Frame…', 'yellow', false);
+          statusbar.classList.add('show');
+        }
+      };
+
+      ws.onclose = () => {
+        offBanner.classList.add('show');
+        reconnectTimer = setTimeout(connect, 2500);
+      };
+
+      ws.onerror = () => { try { ws.close(); } catch {} };
+    }
+
+    // ── Manual Refresh ────────────────────────────────────────────────────
+    refreshBtn.addEventListener('click', () => {
+      fetchSnapshot();
+      showStatus('正在刷新…', 'yellow');
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'refresh' }));
+    });
+
+    // ── Install Banner ────────────────────────────────────────────────────
+    const installBanner = document.getElementById('install-banner');
+    const installSteps  = document.getElementById('install-steps');
+    const installClose  = document.getElementById('install-close');
+    const isStandalone  = window.matchMedia('(display-mode: standalone)').matches
+                       || window.navigator.standalone === true;
+    const dismissed     = localStorage.getItem('install-dismissed');
+
+    if (!isStandalone && !dismissed) {
+      const isIOS     = /iphone|ipad|ipod/i.test(navigator.userAgent);
+      const isAndroid = /android/i.test(navigator.userAgent);
+      const steps     = isIOS
+        ? [['1','点击底部 <strong>分享</strong> 按钮 □↑'], ['2','选择「<strong>添加到主屏幕</strong>」'], ['3','点击右上角「<strong>添加</strong>」']]
+        : isAndroid
+        ? [['1','点击右上角 <strong>⋮ 菜单</strong>'], ['2','选择「<strong>添加到主屏幕</strong>」或「<strong>安装应用</strong>」']]
+        : null;
+
+      if (steps) {
+        steps.forEach(([num, text]) => {
+          const el = document.createElement('div');
+          el.className = 'ib-step';
+          el.innerHTML = `<span class="num">${num}</span><span>${text}</span>`;
+          installSteps.appendChild(el);
+        });
+        setTimeout(() => installBanner.classList.add('show'), 1500);
+      }
+    }
+
+    installClose.addEventListener('click', () => {
+      installBanner.classList.remove('show');
+      localStorage.setItem('install-dismissed', '1');
+    });
+
+    // ── Init ──────────────────────────────────────────────────────────────
+    applyFit();
+    connect();
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
+
+    // ── Auto fullscreen (hides Android status bar) ────────────────────────
+    function requestFullscreen() {
+      const el = document.documentElement;
+      const req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen;
+      if (req && !document.fullscreenElement) req.call(el, { navigationUI: 'hide' }).catch(() => {});
+    }
+    // Try immediately on load, then again on first tap
+    setTimeout(requestFullscreen, 500);
+    document.addEventListener('click', requestFullscreen, { once: true });
+  </script>
+</body>
+</html>

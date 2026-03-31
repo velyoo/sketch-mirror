@@ -1,0 +1,31 @@
+{
+  "name": "Sketch Mirror",
+  "short_name": "Mirror",
+  "description": "Preview Sketch designs on your device in real time",
+  "start_url": "/",
+  "display": "fullscreen",
+  "display_override": ["fullscreen"],
+  "orientation": "any",
+  "background_color": "#111111",
+  "theme_color": "#111111",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

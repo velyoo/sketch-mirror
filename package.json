@@ -1,0 +1,13 @@
+{
+  "name": "sketch-mirror",
+  "version": "1.0.0",
+  "description": "Sketch Mirror - Preview your designs on mobile devices",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "ws": "^8.18.0"
+  }
+}
