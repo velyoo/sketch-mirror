@@ -1,6 +1,6 @@
 {
   "name": "sketch-mirror",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "description": "Sketch Mirror - Preview your designs on mobile devices",
   "main": "server.js",
   "scripts": {

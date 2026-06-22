@@ -4,6 +4,7 @@
  */
 
 const https = require('https');
+const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
@@ -138,7 +139,7 @@ function ensureIcons() {
 ensureIcons();
 
 const PORT = 3000;
-const POLL_INTERVAL = 1500; // ms
+const POLL_INTERVAL = 800; // ms
 const MCP_BASE = 'http://localhost:31126';
 const EXPORT_PATH = '/tmp/sketch-mirror-preview.png';
 const FRAMES_DIR = '/tmp/sketch-mirror-frames';
@@ -147,137 +148,92 @@ const FRAMES_DIR = '/tmp/sketch-mirror-frames';
 
 class SketchMCPClient {
   constructor() {
-    this.messagesUrl = null;
-    this.listeners = new Map();
     this.reqId = 0;
-    this.sseProc = null;
     this.ready = false;
     this.onReconnect = null;
-    this.everConnected = false; // only auto-reconnect after first successful init
+    this.everConnected = false;
+    this._reconnectDelay = 2000;
+    this._healthTimer = null;
   }
 
-  connect() {
+  _post(method, params, id, timeoutMs = 30000) {
     return new Promise((resolve, reject) => {
-      if (this.sseProc) {
-        try { this.sseProc.kill(); } catch {}
-      }
-
-      this.ready = false;
-      this.messagesUrl = null;
-
-      this.sseProc = spawn('/usr/bin/curl', ['-sN', `${MCP_BASE}/sse`]);
-
-      let buffer = '';
-
-      this.sseProc.stdout.on('data', (chunk) => {
-        buffer += chunk.toString();
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (trimmed.startsWith('data: http')) {
-            this.messagesUrl = trimmed.slice(6).trim();
-          } else if (trimmed.startsWith('data:') && trimmed.length > 5) {
-            try {
-              const msg = JSON.parse(trimmed.slice(5).trim());
-              const id = msg.id;
-              if (id != null && this.listeners.has(id)) {
-                const cb = this.listeners.get(id);
-                this.listeners.delete(id);
-                cb(null, msg);
-              }
-            } catch {}
-          }
+      const body = JSON.stringify({ jsonrpc: '2.0', id: id ?? null, method, params: params || {} });
+      const req = http.request({
+        hostname: 'localhost',
+        port: 31126,
+        path: '/mcp',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body)
         }
+      }, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          if (!data.trim()) return resolve(null);
+          try { resolve(JSON.parse(data)); }
+          catch (e) { reject(new Error('Invalid JSON response')); }
+        });
       });
+      req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error('Request timeout')); });
+      req.on('error', reject);
+      req.write(body);
+      req.end();
+    });
+  }
 
-      this.sseProc.on('close', () => {
-        this.ready = false;
-        this.messagesUrl = null;
-        // Cancel all pending requests immediately so they don't wait for timeout
-        for (const [, cb] of this.listeners) cb(new Error('SSE disconnected'), null);
-        this.listeners.clear();
-        // Only auto-reconnect after we've had at least one successful connection
-        if (this.everConnected) {
-          process.stdout.write('\n[MCP] Connection dropped, reconnecting...\n');
+  async connect() {
+    this.ready = false;
+    const result = await this._post('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'sketch-mirror', version: '1.0' }
+    }, ++this.reqId, 5000);
+    if (result.error) throw new Error(result.error.message);
+    await this._post('notifications/initialized', {}, null);
+    this.ready = true;
+    this.everConnected = true;
+    this._startHealthCheck();
+  }
+
+  _startHealthCheck() {
+    if (this._healthTimer) clearInterval(this._healthTimer);
+    this._healthTimer = setInterval(async () => {
+      try {
+        await this._post('tools/list', {}, ++this.reqId, 5000);
+      } catch (e) {
+        if (this.ready) {
+          this.ready = false;
+          clearInterval(this._healthTimer);
+          this._healthTimer = null;
+          process.stdout.write('\n[MCP] Connection lost, reconnecting...\n');
           setTimeout(() => this._reconnect(), 2000);
         }
-      });
-
-      // Wait up to 5 seconds for messages URL
-      const timer = setTimeout(() => reject(new Error('SSE connect timeout')), 5000);
-      const check = setInterval(() => {
-        if (this.messagesUrl) {
-          clearInterval(check);
-          clearTimeout(timer);
-          resolve();
-        }
-      }, 100);
-    });
+      }
+    }, 10000);
   }
 
   async _reconnect() {
     try {
       await this.connect();
-      await this.initialize();
+      this._reconnectDelay = 2000;
       console.log('[MCP] Reconnected to Sketch');
       if (this.onReconnect) this.onReconnect();
     } catch (e) {
-      console.log('[MCP] Reconnect failed, retrying...');
-      setTimeout(() => this._reconnect(), 3000);
+      this._reconnectDelay = Math.min(this._reconnectDelay * 1.5, 30000);
+      console.log(`[MCP] Reconnect failed, retrying in ${Math.round(this._reconnectDelay / 1000)}s...`);
+      setTimeout(() => this._reconnect(), this._reconnectDelay);
     }
-  }
-
-  _post(method, params, id) {
-    return new Promise((resolve, reject) => {
-      if (!this.messagesUrl) return reject(new Error('Not connected'));
-      const body = JSON.stringify({ jsonrpc: '2.0', id: id ?? null, method, params: params || {} });
-      const proc = spawn('/usr/bin/curl', [
-        '-s', '-X', 'POST', this.messagesUrl,
-        '-H', 'Content-Type: application/json',
-        '-d', body
-      ]);
-      proc.on('close', (code) => code === 0 ? resolve() : reject(new Error(`curl exit ${code}`)));
-      proc.on('error', reject);
-    });
-  }
-
-  _waitFor(id, timeoutMs = 10000) {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.listeners.delete(id);
-        reject(new Error(`Timeout for request ${id}`));
-      }, timeoutMs);
-
-      this.listeners.set(id, (err, msg) => {
-        clearTimeout(timer);
-        if (err) reject(err);
-        else resolve(msg);
-      });
-    });
-  }
-
-  async initialize() {
-    const id = ++this.reqId;
-    const result = this._waitFor(id);
-    await this._post('initialize', {
-      protocolVersion: '2024-11-05',
-      capabilities: {},
-      clientInfo: { name: 'sketch-mirror', version: '1.0' }
-    }, id);
-    await result;
-    await this._post('notifications/initialized', {}, null);
-    this.ready = true;
-    this.everConnected = true;
   }
 
   async callTool(name, args) {
     if (!this.ready) throw new Error('MCP not ready');
     const id = ++this.reqId;
-    const result = this._waitFor(id, 60000); // 60s timeout for slow exports
-    await this._post('tools/call', { name, arguments: args || {} }, id);
-    return await result;
+    const result = await this._post('tools/call', { name, arguments: args || {} }, id, 60000);
+    if (result.error) throw new Error(result.error.message);
+    return result;
   }
 
   async exportSelectedFrame() {
@@ -314,14 +270,14 @@ class SketchMCPClient {
 const mcp = new SketchMCPClient();
 const wsClients = new Set();
 let lastFileHash = null;
+let lastFrameId = null;
 let lastImageB64 = null;
 let pollInProgress = false;
 let currentFrameInfo = null; // { index, total, name }
 
 function fileHash(buf) {
   let h = 0x811c9dc5;
-  const end = Math.min(buf.length, 8192);
-  for (let i = 0; i < end; i++) {
+  for (let i = 0; i < buf.length; i++) {
     h ^= buf[i];
     h = Math.imul(h, 0x01000193) >>> 0;
   }
@@ -357,6 +313,7 @@ function findFirstPng(dir) {
 
 async function poll() {
   if (pollInProgress) return; // Prevent concurrent polls
+  if (!mcp.ready) return;    // Silently skip while disconnected/reconnecting
   pollInProgress = true;
   try {
     clearFramesDir();
@@ -382,12 +339,14 @@ async function poll() {
 
     // Parse frame info from token: "id,idx,total,name"
     const parts = token.split(',');
+    const frameId = parts[0];
     const frameInfo = parts.length >= 4
       ? { index: parseInt(parts[1]), total: parseInt(parts[2]), name: parts.slice(3).join(',') }
       : null;
 
-    if (h !== lastFileHash) {
+    if (h !== lastFileHash || frameId !== lastFrameId) {
       lastFileHash = h;
+      lastFrameId = frameId;
       lastImageB64 = buf;
       currentFrameInfo = frameInfo;
       broadcast({ type: 'update', frameInfo });
@@ -478,12 +437,20 @@ function getTailscaleDomain() {
 }
 
 function ensureCert(domain) {
-  const crt = path.join(__dirname, `${domain}.crt`);
-  const key = path.join(__dirname, `${domain}.key`);
+  // Mac App Store Tailscale runs in a sandbox and writes certs to its container dir
+  const sandboxDir = path.join(os.homedir(), 'Library/Containers/io.tailscale.ipn.macos/Data');
+  const useSandbox = fs.existsSync(sandboxDir);
+  const certDir = useSandbox ? sandboxDir : __dirname;
+  const crt = path.join(certDir, `${domain}.crt`);
+  const key = path.join(certDir, `${domain}.key`);
   if (!fs.existsSync(crt) || !fs.existsSync(key)) {
     console.log(`Generating TLS cert for ${domain}…`);
     const { execSync } = require('child_process');
-    execSync(`"${TAILSCALE}" cert --cert-file "${crt}" --key-file "${key}" "${domain}"`, { stdio: 'inherit' });
+    if (useSandbox) {
+      execSync(`"${TAILSCALE}" cert "${domain}"`, { stdio: 'inherit' });
+    } else {
+      execSync(`"${TAILSCALE}" cert --cert-file "${crt}" --key-file "${key}" "${domain}"`, { stdio: 'inherit' });
+    }
   }
   return { key: fs.readFileSync(key), cert: fs.readFileSync(crt) };
 }
@@ -630,12 +597,81 @@ async function generateQR(text) {
 process.on('uncaughtException', (e) => console.error('[uncaught]', e.message));
 process.on('unhandledRejection', (e) => console.error('[unhandled]', e?.message || e));
 
+function isNewerVersion(remote, local) {
+  const r = remote.split('.').map(Number);
+  const l = local.split('.').map(Number);
+  for (let i = 0; i < Math.max(r.length, l.length); i++) {
+    if ((r[i] || 0) > (l[i] || 0)) return true;
+    if ((r[i] || 0) < (l[i] || 0)) return false;
+  }
+  return false;
+}
+
+// Returns true if an update was applied and a restart is in progress.
+function checkAndUpdate() {
+  return new Promise((resolve) => {
+    const localVersion = require('./package.json').version;
+    const timer = setTimeout(() => resolve(false), 5000);
+
+    https.get(`https://gist.githubusercontent.com/velyoo/15808e46ca37c6c250915e6388f23bd9/raw/version.json?t=${Date.now()}`, res => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        clearTimeout(timer);
+        try {
+          const info = JSON.parse(data);
+          if (!info.version || !isNewerVersion(info.version, localVersion)) return resolve(false);
+
+          console.log(`⚠️  发现新版本 ${info.version}（当前 ${localVersion}），正在下载并自动更新…`);
+          const tmpZip = path.join(os.tmpdir(), 'sketch-mirror-update.zip');
+          const tmpDir = path.join(os.tmpdir(), 'sketch-mirror-update');
+          const file = fs.createWriteStream(tmpZip);
+          https.get(info.download, r2 => {
+            r2.pipe(file);
+            file.on('finish', () => {
+              file.close();
+              try {
+                const { execSync } = require('child_process');
+                fs.rmSync(tmpDir, { recursive: true, force: true });
+                execSync(`unzip -o "${tmpZip}" -d "${tmpDir}"`, { stdio: 'ignore' });
+                const srcDir = path.join(tmpDir, 'sketch-mirror');
+                execSync(`rsync -a --exclude=node_modules --exclude='*.crt' --exclude='*.key' "${srcDir}/" "${__dirname}/"`, { stdio: 'ignore' });
+                try { execSync(`cd "${__dirname}" && npm install --silent`, { stdio: 'ignore', timeout: 30000 }); } catch {}
+                console.log(`✅  已更新到 ${info.version}，3 秒后自动重启…\n`);
+                setTimeout(() => {
+                  spawn('/bin/sh', ['-c', `sleep 1 && node "${path.join(__dirname, 'server.js')}"`], {
+                    stdio: 'inherit',
+                    cwd: __dirname,
+                  });
+                  process.exit(0);
+                }, 3000);
+                resolve(true);
+              } catch (e) {
+                console.error(`⚠️  自动更新失败：${e.message}`);
+                console.log(`   请手动解压 ${tmpZip} 替换 sketch-mirror 文件夹\n`);
+                resolve(false);
+              }
+            });
+          }).on('error', () => {
+            fs.unlink(tmpZip, () => {});
+            console.log('⚠️  下载失败，请手动获取新版本\n');
+            resolve(false);
+          });
+        } catch (_) { resolve(false); }
+      });
+    }).on('error', () => { clearTimeout(timer); resolve(false); });
+  });
+}
+
 async function main() {
+  // Check for updates before anything else — works even if MCP is broken
+  const updating = await checkAndUpdate();
+  if (updating) return;
+
   console.log('Connecting to Sketch MCP...');
 
   try {
     await mcp.connect();
-    await mcp.initialize();
     console.log('Connected to Sketch MCP ✓');
   } catch (e) {
     console.error('Could not connect to Sketch MCP:', e.message);
@@ -644,27 +680,13 @@ async function main() {
   }
 
   server.listen(PORT, '0.0.0.0', async () => {
+    const localVersion = require('./package.json').version;
     const ip = getLocalIP();
     const tsURL = `https://${CERT_NAME}:${PORT}`;
     const qr = await generateQR(tsURL);
 
-    // Check for updates (non-blocking)
-    const localVersion = require('./package.json').version;
-    https.get('https://gist.githubusercontent.com/velyoo/15808e46ca37c6c250915e6388f23bd9/raw/version.json', res => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          const remote = JSON.parse(data).version;
-          if (remote && remote !== localVersion) {
-            console.log(`\n⚠️  发现新版本 ${remote}（当前 ${localVersion}），请向管理员获取最新安装包\n`);
-          }
-        } catch (_) {}
-      });
-    }).on('error', () => {});
-
     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('  Sketch Mirror is running!');
+    console.log(`  Sketch Mirror is running!  (v${localVersion})`);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log(`  Local:      https://localhost:${PORT}`);
     console.log(`  WiFi:       https://${ip}:${PORT}`);
